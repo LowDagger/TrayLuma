@@ -13,9 +13,15 @@ periodic monitor polling while idle.
 
 ## Install
 
-Download **[TrayLuma-Setup.exe](https://github.com/LowDagger/TrayLuma/releases/latest/download/TrayLuma-Setup.exe)**
-from the [latest release](https://github.com/LowDagger/TrayLuma/releases/latest).
-It installs for your Windows account without administrator rights. Find
+> **v1.2.0 installer warning:** VirusTotal reported four detections for
+> `TrayLuma-Setup.exe`, including Microsoft. Avoid this installer pending review;
+> do not disable antivirus to run it. The portable executable separately returned
+> 0 malicious/suspicious detections from 71 supporting engines in that scan, which
+> is not a guarantee of safety. See the [hash-bound scan report](https://github.com/LowDagger/TrayLuma/releases/download/v1.2.0/security-report.md).
+
+**The v1.2.0 installer is under review and is not currently recommended.**
+See the [release warning and reports](https://github.com/LowDagger/TrayLuma/releases/tag/v1.2.0).
+The installer supports installation for your Windows account without administrator rights. Find
 **TrayLuma** in Windows Search; uninstall from **Settings → Apps → Installed apps**.
 Startup at sign-in and a desktop shortcut are optional.
 

@@ -59,7 +59,18 @@ if (!$defenderFailed -and $scanCode -eq 0) {
 }
 $notes = [string]$release.body
 $notes = [regex]::Replace($notes,'(?s)\s*<!-- trayluma-verification:start -->.*?<!-- trayluma-verification:end -->','')
+$notes = [regex]::Replace($notes,'(?s)\s*<!-- trayluma-scan-status:start -->.*?<!-- trayluma-scan-status:end -->','')
 $url = "https://github.com/$Repository/releases/download/$Tag"
+$status = if ($defenderFailed -or $scanCode -eq 2) {
+    '**VERIFICATION BLOCKED: antivirus detections or scanner issues were reported.** Do not assume false positives or disable antivirus to run a flagged artifact.'
+} elseif ($scanCode -eq 3) {
+    '**VERIFICATION INCOMPLETE: the requested VirusTotal scan did not complete.** This is not a clean scan.'
+} elseif (!$env:VT_API_KEY) {
+    '**VirusTotal was not requested.** No VirusTotal clearance is claimed.'
+} else {
+    '**Latest requested scans completed with no malicious/suspicious detections reported.** This is a point-in-time observation, not a safety guarantee.'
+}
+$notes = "<!-- trayluma-scan-status:start -->`n$status`n`n[Current scan report]($url/security-report.md). This status supersedes earlier scan observations below.`n<!-- trayluma-scan-status:end -->`n`n" + $notes.Trim()
 $notes += "`n`n<!-- trayluma-verification:start -->`n## Current binary verification`n[Scan report]($url/security-report.md) · [SHA-256]($url/SHA256SUMS.txt) · [Package manifests]($url/package-manifests.zip)`nReports are tied to file hashes; a missing or pending scan is not a clean result.`n<!-- trayluma-verification:end -->`n"
 $notes | Set-Content -Encoding utf8 "$dist\release-notes.md"
 gh release edit $Tag --repo $Repository --notes-file "$dist\release-notes.md"

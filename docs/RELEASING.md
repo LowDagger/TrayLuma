@@ -89,6 +89,13 @@ publish a replacement installer on incomplete verification. Use **Run workflow**
 on **main**, with **force** checked, to test a fix against an existing release;
 rerunning an old historical workflow uses its old code.
 
+The first successful live API check identified a transient 404 from the analysis
+lookup, not an invalid API key. Retrying completed both analyses. The portable
+v1.2.0 executable had no detections among 71 supporting engines; its installer had
+four detections, including Microsoft. Verification correctly failed on those
+results. They must be investigated rather than suppressed or assumed to be false
+positives. The release/README carry a warning while the installer is under review.
+
 ## Local installer and benchmarks
 
 For the full local pipeline, use `.\scripts\Verify-Release.ps1` (or `-Quick` for

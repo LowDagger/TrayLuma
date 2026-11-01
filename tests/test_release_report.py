@@ -49,10 +49,14 @@ class ReleaseReportTests(unittest.TestCase):
             self.assertNotEqual(before['files'][0]['sha256'], after['files'][0]['sha256'])
 
     def test_malicious_or_suspicious_results_fail(self):
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'VT_API_KEY': 'test-only'}), patch.object(REPORT, 'scan', return_value={'status': 'completed', 'stats': {'malicious': 0, 'suspicious': 1}}):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'VT_API_KEY': 'test-only'}), patch.object(REPORT, 'scan', return_value={'status': 'completed', 'stats': {'malicious': 0, 'suspicious': 1}, 'engines': {'MockAV': {'category': 'suspicious', 'result': 'Test-only label'}}}):
             code, data = self.generate(Path(tmp), ['--upload-virustotal'])
             self.assertEqual(code, 2)
             self.assertTrue(data['detections_reported'])
+            markdown = (Path(tmp) / 'out/security-report.md').read_text(encoding='utf-8')
+            self.assertIn('VERIFICATION BLOCKED', markdown)
+            self.assertIn('MockAV', markdown)
+            self.assertIn('Test-only label', markdown)
 
     def test_defender_report_for_other_hash_is_not_reused(self):
         with tempfile.TemporaryDirectory() as tmp:

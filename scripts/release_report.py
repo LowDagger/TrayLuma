@@ -147,6 +147,42 @@ def scan(path, key):
     return result
 
 
+def render_markdown(report):
+    records = report["files"]
+    lines = ["# TrayLuma release verification", "", report["notice"], "",
+             "Generated: " + report["timestamp_utc"], ""]
+    if report["detections_reported"]:
+        lines += ["**VERIFICATION BLOCKED: antivirus detections were reported.**",
+                  "Do not assume false positives or disable protection to run a flagged artifact.", ""]
+    lines += ["VirusTotal analysis status: **" + report["virustotal_status"] + "**", "",
+              "| Artifact | Bytes | Defender | VirusTotal |", "|---|---:|---|---|"]
+    flagged = []
+    for item in records:
+        vt = item["virustotal"]
+        text = vt["status"]
+        if vt.get("stage"):
+            text += f' ({vt["stage"]}' + (f', HTTP {vt["http_status"]}' if vt.get("http_status") else '') + ')'
+        if vt.get("api_error_code"):
+            text += ': ' + vt["api_error_code"]
+        if vt["status"] == "completed":
+            stats = vt["stats"]
+            text += f': {stats.get("malicious", 0)} malicious, {stats.get("suspicious", 0)} suspicious'
+        local = item["defender"]["status"] if item["defender"] else "not-run"
+        lines.append(f'| {item["filename"]} | {item["bytes"]} | {local} | [{text}]({item["virustotal_url"]}) |')
+        for engine, verdict in vt.get("engines", {}).items():
+            if verdict.get("category") in ("malicious", "suspicious"):
+                # Provider strings are data, not Markdown instructions.
+                label = str(verdict.get("result") or verdict["category"]).replace("\n", " ").replace("|", "\\|")
+                name = engine.replace("\n", " ").replace("|", "\\|")
+                flagged.append(f'| {item["filename"]} | {name} | {label} |')
+    if flagged:
+        lines += ["", "## Reported detections", "", "| Artifact | Engine | Label |", "|---|---|---|"] + flagged
+    lines += ["", "## SHA-256", "", "```text"]
+    lines += [f'{item["sha256"]}  {item["filename"]}' for item in records]
+    lines += ["```", "", "Unsigned executables may trigger SmartScreen. A hash link alone does not prove a scan exists."]
+    return "\n".join(lines) + "\n"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("files", nargs="+", type=Path)
@@ -197,29 +233,11 @@ def main():
               "notice": "A scan is a point-in-time observation, not a security guarantee. Not-configured/pending is not clean.",
               "files": records}
     (args.output / "release-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    lines = ["# TrayLuma release verification", "", report["notice"], "",
-              "Generated: " + report["timestamp_utc"], "",
-             "VirusTotal: **" + report["virustotal_status"] + "**", "",
-             "| Artifact | Bytes | Defender | VirusTotal |", "|---|---:|---|---|"]
-    for item in records:
-        vt = item["virustotal"]
-        text = vt["status"]
-        if vt.get("stage"):
-            text += f' ({vt["stage"]}' + (f', HTTP {vt["http_status"]}' if vt.get("http_status") else '') + ')'
-        if vt.get("api_error_code"):
-            text += ': ' + vt["api_error_code"]
-        if vt["status"] == "completed":
-            stats = vt["stats"]
-            text += f': {stats.get("malicious", 0)} malicious, {stats.get("suspicious", 0)} suspicious'
-        local = item["defender"]["status"] if item["defender"] else "not-run"
-        lines.append(f'| {item["filename"]} | {item["bytes"]} | {local} | [{text}]({item["virustotal_url"]}) |')
-    lines += ["", "## SHA-256", "", "```text"]
-    lines += [f'{item["sha256"]}  {item["filename"]}' for item in records]
-    lines += ["```", "", "Unsigned executables may trigger SmartScreen. A hash link alone does not prove a scan exists."]
-    (args.output / "security-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    markdown = render_markdown(report)
+    (args.output / "security-report.md").write_text(markdown, encoding="utf-8")
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-            summary.write("\n".join(lines) + "\n")
+            summary.write(markdown)
     (args.output / "SHA256SUMS.txt").write_text(
         "".join(f'{item["sha256"]}  {item["filename"]}\n' for item in records), encoding="ascii")
     print("Reports written to", args.output)
