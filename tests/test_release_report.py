@@ -21,7 +21,8 @@ class ReleaseReportTests(unittest.TestCase):
         if not exe.exists():
             exe.write_bytes(b'test artifact; never executed')
         argv = ['report', str(exe), '--output', str(root / 'out')] + (extra or [])
-        with patch.object(sys, 'argv', argv), contextlib.redirect_stdout(io.StringIO()):
+        # Mock security results must never pollute a real GitHub Actions summary.
+        with patch.object(sys, 'argv', argv), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': ''}), contextlib.redirect_stdout(io.StringIO()):
             code = REPORT.main()
         data = json.loads((root / 'out/release-report.json').read_text())
         return code, data

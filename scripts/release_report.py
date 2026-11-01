@@ -11,7 +11,8 @@ import urllib.request
 from datetime import datetime, timezone
 
 API = "https://www.virustotal.com/api/v3"
-LAST_REQUEST = 0.0
+# Initial cooldown also separates the last call of a previous serialized job.
+LAST_REQUEST = time.monotonic()
 SAFE_ERROR_CODES = {
     "NotFoundError", "AuthenticationRequiredError", "WrongCredentialsError", "ForbiddenError",
     "QuotaExceededError", "TooManyRequestsError", "TransientError", "BadRequestError",

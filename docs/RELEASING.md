@@ -9,7 +9,8 @@
    This opts public release artifacts into VirusTotal sharing; follow its API
    terms/quotas. The script rate-limits requests and never logs the key. Release
    and refresh workflows share a concurrency group so their scan jobs cannot
-   overlap. This does not reserve quota against other apps using your account,
+   overlap. An initial cooldown also separates API calls at job boundaries.
+   This does not reserve quota against other apps using your account,
    and GitHub concurrency may replace older pending runs with newer ones.
 3. Code signing is not configured. An antivirus report does not replace a code
    signature or establish SmartScreen reputation.
