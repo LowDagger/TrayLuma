@@ -7,7 +7,10 @@
 2. Optional: add **Settings → Secrets and variables → Actions → `VT_API_KEY`**.
    Do not paste it into issues, source files, command-line arguments or chat.
    This opts public release artifacts into VirusTotal sharing; follow its API
-   terms/quotas. The script rate-limits requests and never logs the key.
+   terms/quotas. The script rate-limits requests and never logs the key. Release
+   and refresh workflows share a concurrency group so their scan jobs cannot
+   overlap. This does not reserve quota against other apps using your account,
+   and GitHub concurrency may replace older pending runs with newer ones.
 3. Code signing is not configured. An antivirus report does not replace a code
    signature or establish SmartScreen reputation.
 
@@ -27,8 +30,11 @@ git push fork v1.2.0
 Setup installer, runs a demo benchmark, scans with Defender when available,
 optionally submits both binaries to VirusTotal, generates hash-bound reports
 and package submissions, and creates a release. Detected malicious/suspicious
-results block automatic publication. Missing/pending/error AV results are
-reported honestly; inspect them before recommending a release to users.
+results block automatic publication. If VirusTotal is requested, missing keys,
+pending analyses, API errors and empty engine results also fail verification.
+Reports/artifacts are retained for diagnosis. Without a configured key, the
+workflows skip VirusTotal and explicitly report not-requested; this is not a
+VirusTotal clean result.
 
 The source build workflow does not overwrite an existing release. Use a new
 version for every public binary, especially after a package-manager submission.
@@ -60,6 +66,27 @@ Never reuse the scan result from an older executable. `release-report.json`
 binds every observation to filename, SHA-256 and time. VirusTotal links can exist
 before any scan does; pending/not-configured/error is never labelled clean.
 Reports are advisory, not a malware guarantee. See `SECURITY.md`.
+
+### Diagnosing VirusTotal failures
+
+The Actions summary and reports identify the failing stage (`upload`, `analysis`,
+or `file-report`), HTTP status and an allowlisted API error code. Keys, request
+headers and raw API error bodies are never logged. HTTP 401/403 typically concern
+authentication/authorization; 429 concerns quota/rate limits. A 404 must be
+interpreted in the context of its stage, not assumed to be an invalid key.
+
+Analysis identifiers are URL-encoded. Temporary analysis 404s and server failures
+receive bounded retries without repeated file uploads. If an analysis lookup is
+unavailable, a matching SHA-256 file report may be used only when its analysis
+timestamp is at least the current submission time and it has actual engine
+verdicts. Old cached results and empty statistics are rejected.
+
+Exit codes: 0 = requested checks completed (or VirusTotal not requested),
+2 = malicious/suspicious/Defender issue reported, 3 = requested VirusTotal scan
+incomplete. Refresh jobs attach the failed report before failing; they do not
+publish a replacement installer on incomplete verification. Use **Run workflow**
+on **main**, with **force** checked, to test a fix against an existing release;
+rerunning an old historical workflow uses its old code.
 
 ## Local installer and benchmarks
 

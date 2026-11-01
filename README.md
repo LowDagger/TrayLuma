@@ -50,7 +50,9 @@ Each source release includes:
 - A demo-mode benchmark and scan logs in `verification-details.zip`.
 
 VirusTotal upload is opt-in via the maintainer's `VT_API_KEY` GitHub Secret.
-Without it, reports say **not-configured**, not "clean". Results are bound to the
+Without it, workflows skip VirusTotal and say **not-requested**, not "clean".
+With a key configured, API failures or incomplete analyses make the scan job fail
+after saving its diagnostics. Results are bound to the
 exact file hash and scan time; they are not a guarantee of safety.
 
 CI demo benchmarks do **not** measure real monitor communication. Working set is

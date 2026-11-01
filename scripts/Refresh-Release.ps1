@@ -30,10 +30,13 @@ if ($oldExe -and $oldExe.sha256 -eq $sha -and $release.assets.name -contains 'Tr
     $oldSetup = @($previous.files | Where-Object filename -eq 'TrayLuma-Setup.exe') | Select-Object -First 1
     $matches = $oldSetup -and $oldSetup.sha256 -eq (Get-FileHash "$dist\TrayLuma-Setup.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
 }
-if ($matches -and $env:VT_API_KEY -and @($previous.files | Where-Object { $_.virustotal.status -in @('not-configured','pending','api-error','error') }).Count) {
+if ($matches -and $env:VT_API_KEY -and @($previous.files | Where-Object { $_.virustotal.status -ne 'completed' }).Count) {
     $Force = $true # Finish a previously unavailable/incomplete analysis once configured.
 }
-if ($matches -and !$Force) { 'Current binary hashes already have reports. Nothing changed.'; return }
+if ($matches -and !$Force) {
+    if ($previous.detections_reported) { throw 'The matching saved report contains detections; inspect it before treating this release as verified.' }
+    'Current binary hashes already have reports. Nothing changed.'; return
+}
 $version = (Get-Item $exe).VersionInfo.ProductVersion
 if ($version -ne $Tag.Substring(1)) { throw 'Uploaded executable product version must match the release tag.' }
 if (!$oldExe -or $oldExe.sha256 -ne $sha -or !$matches) {
@@ -42,9 +45,11 @@ if (!$oldExe -or $oldExe.sha256 -ne $sha -or !$matches) {
 $defenderFailed = $false
 try { & (Join-Path $PSScriptRoot 'Scan-Defender.ps1') -Files $exe,"$dist\TrayLuma-Setup.exe" -OutputDirectory "$dist\security" }
 catch { $defenderFailed=$true; Write-Warning 'Defender reported an issue. Reports will still be attached.' }
-python (Join-Path $PSScriptRoot 'release_report.py') $exe "$dist\TrayLuma-Setup.exe" --output $dist --defender "$dist\security\defender.json" --tag $Tag --repository $Repository --upload-virustotal
+$vtArgs = @()
+if ($env:VT_API_KEY) { $vtArgs += '--upload-virustotal' }
+python (Join-Path $PSScriptRoot 'release_report.py') $exe "$dist\TrayLuma-Setup.exe" --output $dist --defender "$dist\security\defender.json" --tag $Tag --repository $Repository @vtArgs
 $scanCode = $LASTEXITCODE
-if ($scanCode -notin @(0,2)) { throw 'Report generation failed.' }
+if ($scanCode -notin @(0,2,3)) { throw 'Report generation failed.' }
 & (Join-Path $PSScriptRoot 'New-PackageManifests.ps1') -Version $version -InstallerPath "$dist\TrayLuma-Setup.exe" -Repository $Repository
 gh release upload $Tag "$dist\SHA256SUMS.txt" "$dist\release-report.json" "$dist\security-report.md" --repo $Repository --clobber
 if ($LASTEXITCODE) { throw 'Report upload failed.' }
@@ -60,3 +65,4 @@ $notes | Set-Content -Encoding utf8 "$dist\release-notes.md"
 gh release edit $Tag --repo $Repository --notes-file "$dist\release-notes.md"
 if ($LASTEXITCODE) { throw 'Release note update failed.' }
 if ($defenderFailed -or $scanCode -eq 2) { throw 'One or more scans reported a problem; inspect the attached report.' }
+if ($scanCode -eq 3) { throw 'Requested VirusTotal verification did not complete. The endpoint/status diagnostics are in security-report.md, release-report.json and the Actions summary.' }

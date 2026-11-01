@@ -11,7 +11,7 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: trayluma-release-scans
   cancel-in-progress: false
 jobs:
   release:
@@ -20,9 +20,10 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, Node 24
         with:
           ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
       - name: Check version and source
         run: |
           if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Use a tag such as v1.2.0' }
@@ -47,13 +48,15 @@ jobs:
         env:
           VT_API_KEY: ${{ secrets.VT_API_KEY }}
         run: |
-          python scripts/release_report.py dist/TrayLuma.exe dist/TrayLuma-Setup.exe --output dist --defender dist/security/defender.json --tag "$env:RELEASE_TAG" --repository "$env:GITHUB_REPOSITORY" --upload-virustotal
-          if ($LASTEXITCODE) { throw 'A scan reported detections; review reports before publishing' }
+          $vtArgs = @()
+          if ($env:VT_API_KEY) { $vtArgs += '--upload-virustotal' }
+          python scripts/release_report.py dist/TrayLuma.exe dist/TrayLuma-Setup.exe --output dist --defender dist/security/defender.json --tag "$env:RELEASE_TAG" --repository "$env:GITHUB_REPOSITORY" @vtArgs
+          if ($LASTEXITCODE) { throw 'A scan reported detections or requested VirusTotal verification did not complete; inspect the report' }
       - name: Generate package-manager submissions
         run: |
           .\scripts\New-PackageManifests.ps1 -Version $env:RELEASE_TAG.Substring(1) -InstallerPath dist\TrayLuma-Setup.exe -Repository $env:GITHUB_REPOSITORY
           Compress-Archive -Path dist\benchmark-demo,dist\security -DestinationPath dist\verification-details.zip -Force
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2, Node 24
         if: always()
         with:
           name: TrayLuma-release-and-reports
