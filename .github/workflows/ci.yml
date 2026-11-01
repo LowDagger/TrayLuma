@@ -1,18 +1,32 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
-
+permissions:
+  contents: read
 jobs:
-  build:
+  windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build
-        run: cargo build --release --locked
+      - name: Rust tests and lint
+        run: |
+          cargo test --locked
+          if ($LASTEXITCODE) { throw 'Tests failed' }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE) { throw 'Clippy failed' }
+      - name: Tooling tests
+        run: |
+          python -m unittest discover -s tests -v
+          if ($LASTEXITCODE) { throw 'Tooling tests failed' }
+          .\scripts\Test-Scripts.ps1
+      - name: Build release
+        run: .\build.ps1
+      - name: Demo benchmark (not physical-monitor performance)
+        run: .\scripts\Benchmark.ps1 -ExePath .\dist\TrayLuma.exe -Demo -IdleSeconds 5 -Cycles 10 -Launches 3 -OutputDirectory .\dist\benchmark-demo
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: BrightnessTray
-          path: target/release/BrightnessTray.exe
+          name: TrayLuma-Windows-and-demo-report
+          path: dist/

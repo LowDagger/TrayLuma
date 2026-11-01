@@ -235,7 +235,7 @@ impl Settings {
             let hwnd = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
                 CLASS,
-                w!("Brightness Tray – keyboard shortcuts"),
+                w!("TrayLuma – keyboard shortcuts"),
                 style,
                 x,
                 y,

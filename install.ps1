@@ -1,15 +1,21 @@
-# Installs dist\BrightnessTray.exe for the current user, registers it to
-# start at logon, and launches it. Run build.ps1 first.
-$dir = "$env:LOCALAPPDATA\Programs\BrightnessTray"
-$exe = "$dir\BrightnessTray.exe"
-
-Get-Process BrightnessTray -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 300
-New-Item -ItemType Directory -Force $dir | Out-Null
-Copy-Item "$PSScriptRoot\dist\BrightnessTray.exe" $exe -Force
-
-# Same entry the tray menu's "Start with Windows" writes.
-Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name BrightnessTray -Value "`"$exe`" --background"
-
-Start-Process $exe
-"Installed to $exe (starts with Windows)"
+# Install the tested per-user package. No administrator rights required.
+[CmdletBinding()]
+param([switch]$StartWithWindows, [switch]$MigrateLegacy)
+$ErrorActionPreference = 'Stop'
+$setup = Join-Path $PSScriptRoot 'dist\TrayLuma-Setup.exe'
+if (!(Test-Path $setup)) { throw 'Run .\scripts\Build-Installer.ps1 first.' }
+if ($MigrateLegacy) {
+    $legacy = "$env:LOCALAPPDATA\Programs\BrightnessTray\BrightnessTray.exe"
+    Get-Process BrightnessTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $legacy } | Stop-Process
+    # Keep the old executable and shared shortcut preferences for rollback.
+}
+$tasks = if ($StartWithWindows) { 'startup' } else { '' }
+$p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/TASKS=`"$tasks`"" -Wait -PassThru
+if ($p.ExitCode -ne 0) { throw "Installer failed ($($p.ExitCode))." }
+if ($MigrateLegacy) {
+    $run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    $value = Get-ItemPropertyValue $run -Name BrightnessTray -ErrorAction SilentlyContinue
+    if ($value -and $value.Contains($legacy)) { Remove-ItemProperty $run -Name BrightnessTray }
+}
+Start-Process "$env:LOCALAPPDATA\Programs\TrayLuma\TrayLuma.exe" -ArgumentList '--background'
+& (Join-Path $PSScriptRoot 'scripts\Test-Installation.ps1')

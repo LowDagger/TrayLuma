@@ -1,4 +1,4 @@
-//! Brightness Tray: a tray icon that pops up a brightness slider per display.
+//! TrayLuma: a tray icon that pops up a brightness slider per display.
 //! Displays without hardware brightness control are dimmed with a
 //! click-through overlay window instead.
 //!
@@ -37,6 +37,9 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_ROWS: u32 = WM_APP + 2;
 const WM_SHOW: u32 = WM_APP + 3;
 const WM_SHORTCUTS: u32 = WM_APP + 5; // WM_APP + 4 is shortcuts::WM_SETTINGS
+// Read-only automation protocol, enabled only in an isolated --benchmark instance.
+const WM_BENCHMARK: u32 = WM_APP + 6;
+const WM_EXIT: u32 = WM_APP + 7;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const ID_AUTOSTART: usize = 1;
 const ID_EXIT: usize = 2;
@@ -56,7 +59,7 @@ const DIM_CLASS: PCWSTR = w!("BrightnessTray.Dim");
 /// never goes fully black.
 const DIM_MAX_ALPHA: u32 = 220;
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const RUN_NAME: PCWSTR = w!("BrightnessTray");
+const RUN_NAME: PCWSTR = w!("TrayLuma");
 const BACKGROUND_ARG: &str = "--background";
 const SHORTCUTS_ARG: &str = "--shortcuts";
 
@@ -115,6 +118,7 @@ struct Geo {
 }
 
 struct App {
+    benchmark: bool,
     hwnd: HWND,
     tx: Sender<Cmd>,
     rows: Vec<Row>,
@@ -157,10 +161,33 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let open_shortcuts = std::env::args().any(|a| a == SHORTCUTS_ARG);
+        let benchmark = std::env::args().any(|a| a == "--benchmark");
+        if std::env::args().any(|a| a == "--quit") {
+            if let Ok(hwnd) = FindWindowW(CLASS, None) {
+                let mut pid = 0;
+                GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                let process = OpenProcess(PROCESS_SYNCHRONIZE, false, pid);
+                let _ = PostMessageW(hwnd, WM_EXIT, WPARAM(0), LPARAM(0));
+                if let Ok(process) = process {
+                    let stopped = WaitForSingleObject(process, 5000) == WAIT_OBJECT_0;
+                    let _ = CloseHandle(process);
+                    if !stopped {
+                        std::process::exit(1);
+                    }
+                } else {
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
         // Second launch: ask the running instance to open its popup (or the
         // shortcuts window) instead.
-        let _mutex = CreateMutexW(None, true, w!("Local\\BrightnessTray.SingleInstance"));
+        let mutex_name = if benchmark { w!("Local\\TrayLuma.Benchmark") } else { w!("Local\\BrightnessTray.SingleInstance") };
+        let _mutex = CreateMutexW(None, true, mutex_name);
         if GetLastError() == ERROR_ALREADY_EXISTS {
+            if benchmark {
+                return;
+            }
             if let Ok(h) = FindWindowW(CLASS, None) {
                 let _ = AllowSetForegroundWindow(ASFW_ANY);
                 let msg = if open_shortcuts { WM_SHORTCUTS } else { WM_SHOW };
@@ -170,12 +197,13 @@ fn main() {
         }
 
         let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let class = if benchmark { w!("TrayLuma.Benchmark") } else { CLASS };
         let wc = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinst.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            lpszClassName: CLASS,
+            lpszClassName: class,
             ..Default::default()
         };
         RegisterClassExW(&wc);
@@ -190,8 +218,8 @@ fn main() {
         RegisterClassExW(&dim);
         let Ok(hwnd) = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            CLASS,
-            w!("Brightness"),
+            class,
+            w!("TrayLuma"),
             WS_POPUP,
             0,
             0,
@@ -209,6 +237,7 @@ fn main() {
         let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const c_void, 4);
 
         let app = Box::new(App {
+            benchmark,
             hwnd,
             tx: backend::spawn(hwnd, WM_ROWS),
             rows: Vec::new(),
@@ -243,13 +272,15 @@ fn main() {
             SetTimer(hwnd, TIMER_TRAY, 2000, None);
         }
         // Keep the Run entry pointing at this exe if it has been moved.
-        if autostart_enabled() {
+        if !benchmark && autostart_enabled() {
             set_autostart(true);
         }
         // A shortcut taken by another app since it was saved is skipped quietly.
-        let _ = app.hotkeys.register(hwnd);
+        if !benchmark {
+            let _ = app.hotkeys.register(hwnd);
+        }
 
-        if open_shortcuts {
+        if open_shortcuts && !benchmark {
             app.open_settings();
         } else if std::env::args().any(|a| a == BACKGROUND_ARG) {
             set_eco(true);
@@ -299,13 +330,27 @@ impl App {
     fn handle(&mut self, msg: u32, w: WPARAM, l: LPARAM) -> Option<LRESULT> {
         unsafe {
             match msg {
+                WM_EXIT if !self.benchmark => { let _ = DestroyWindow(self.hwnd); }
+                WM_BENCHMARK if self.benchmark => {
+                    match w.0 {
+                        1 => {
+                            self.loaded = false;
+                            self.show();
+                        }
+                        2 => self.hide(),
+                        3 => { let _ = DestroyWindow(self.hwnd); }
+                        _ => {}
+                    }
+                    // Bit 0: enumeration complete; bit 1: visible; remaining bits: row count.
+                    return Some(LRESULT((0x544c0000 | self.rows.len().min(0x3fff) << 2 | self.loaded as usize | (self.visible() as usize) << 1) as isize));
+                }
                 WM_TRAY => match loword(l.0 as usize) {
                     WM_LBUTTONUP => self.toggle(),
-                    WM_RBUTTONUP => self.menu(),
+                    WM_RBUTTONUP if !self.benchmark => self.menu(),
                     _ => {}
                 },
                 WM_SHOW => self.show(),
-                WM_SHORTCUTS => self.open_settings(),
+                WM_SHORTCUTS if !self.benchmark => self.open_settings(),
                 WM_ROWS => self.on_rows(*Box::from_raw(l.0 as *mut Vec<Row>), w.0 as isize as i32),
                 WM_ACTIVATE if loword(w.0) == WA_INACTIVE => self.hide(),
                 WM_ACTIVATE => {
@@ -313,7 +358,7 @@ impl App {
                     self.end_osd();
                     return None;
                 }
-                WM_HOTKEY => {
+                WM_HOTKEY if !self.benchmark => {
                     let step = self.hotkeys.step as i32;
                     match w.0 as i32 {
                         HK_UP => self.shortcut(step),
@@ -321,7 +366,7 @@ impl App {
                         _ => {}
                     }
                 }
-                WM_SETTINGS => self.settings_done(w.0 != 0),
+                WM_SETTINGS if !self.benchmark => self.settings_done(w.0 != 0),
                 WM_TIMER if w.0 == TIMER_OSD => {
                     if self.hover.is_some() || self.drag.is_some() {
                         SetTimer(self.hwnd, TIMER_OSD, OSD_MS, None);
@@ -458,8 +503,8 @@ impl App {
             ..Default::default()
         };
         let tip = match self.rows.first() {
-            Some(r) if self.loaded => format!("Brightness: {}%", r.value),
-            _ => "Brightness".to_string(),
+            Some(r) if self.loaded => format!("TrayLuma · Brightness: {}%", r.value),
+            _ => "TrayLuma".to_string(),
         };
         for (d, s) in nid.szTip.iter_mut().zip(tip.encode_utf16()) {
             *d = s;
@@ -706,6 +751,9 @@ impl App {
     }
 
     fn set_value(&mut self, i: usize, v: u32) {
+        if self.benchmark {
+            return; // Benchmark windows cannot write hardware levels or create dimming overlays.
+        }
         let Some(r) = self.rows.get_mut(i) else { return };
         let v = v.min(100);
         if r.value != v {

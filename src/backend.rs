@@ -15,10 +15,11 @@ use windows::Win32::Devices::Display::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Registry::*;
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 
 use windows::Win32::System::Wmi::*;
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, EDD_GET_DEVICE_INTERFACE_NAME};
 
 const VCP_BRIGHTNESS: u8 = 0x10;
 
@@ -239,12 +240,15 @@ impl Backend {
                 internal.push(dev);
                 continue;
             }
+            // Cloned targets share a GDI source; their order does not identify
+            // the physical DDC handles, so don't reuse the first target's name.
             let name = t
-                .map(|t| t.name.clone())
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| format!("Display {}", external.len() + 1));
-            if force_soft || !ddc_monitors(hm, &dev, &name, &mut external, &mut self.known) {
-                external.push(Mon { ctl: Ctl::Soft(dev), name, value: 100 });
+                .filter(|_| targets.iter().filter(|t| t.gdi == dev).count() == 1)
+                .and_then(|t| monitor_name(&t.name))
+                .or_else(|| gdi_monitor_name(&dev));
+            let fallback = format!("Display {}", external.len() + 1);
+            if force_soft || !ddc_monitors(hm, &dev, name.as_deref(), &fallback, &mut external, &mut self.known) {
+                external.push(Mon { ctl: Ctl::Soft(dev), name: name.unwrap_or(fallback), value: 100 });
             }
         }
         if !internal.is_empty() {
@@ -280,7 +284,7 @@ fn demo_rows() -> Vec<Row> {
 /// Adds every DDC/CI-capable physical monitor behind `hm`; false if none.
 /// A monitor that answered before but misses this read keeps DDC/CI control
 /// with its last known levels instead of falling back to software dimming.
-fn ddc_monitors(hm: HMONITOR, dev: &str, name: &str, out: &mut Vec<Mon>, known: &mut Vec<Known>) -> bool {
+fn ddc_monitors(hm: HMONITOR, dev: &str, name: Option<&str>, fallback: &str, out: &mut Vec<Mon>, known: &mut Vec<Known>) -> bool {
     let before = out.len();
     unsafe {
         let mut n = 0u32;
@@ -310,6 +314,11 @@ fn ddc_monitors(hm: HMONITOR, dev: &str, name: &str, out: &mut Vec<Mon>, known: 
                 let _ = DestroyPhysicalMonitor(h);
                 continue;
             };
+            // PHYSICAL_MONITOR is packed; copy before borrowing the UTF-16 array.
+            let description = pm.szPhysicalMonitorDescription;
+            let physical = monitor_name(&wide_str(&description));
+            let name = if n > 1 { physical.as_deref().or(name) } else { name.or(physical.as_deref()) };
+            let name = name.unwrap_or(fallback);
             let name = if n > 1 { format!("{name} ({})", k + 1) } else { name.to_string() };
             out.push(Mon { ctl: Ctl::Ddc { h, max, key }, name, value });
         }
@@ -334,6 +343,116 @@ fn retry(mut f: impl FnMut() -> bool) -> bool {
 fn wide_str(buf: &[u16]) -> String {
     let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..n])
+}
+
+/// Generic driver labels are not model names; keep searching when we see one.
+fn monitor_name(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || ["Generic PnP Monitor", "Generic Non-PnP Monitor", "Generic Monitor", "Default Monitor", "Monitor"]
+            .iter()
+            .any(|generic| name.eq_ignore_ascii_case(generic))
+        || name.chars().any(char::is_control)
+    {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// Convert a CCD monitor interface or GDI instance ID to its read-only EDID key.
+fn edid_registry_path(device: &str) -> Option<String> {
+    let instance = if let Some(interface) = device.strip_prefix(r"\\?\") {
+        let mut parts = interface.split('#');
+        let (kind, model, instance, guid) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+        if parts.next().is_some() || !guid.starts_with('{') || !guid.ends_with('}') {
+            return None;
+        }
+        format!(r"{kind}\{model}\{instance}")
+    } else {
+        device.to_string()
+    };
+    let parts: Vec<_> = instance.split('\\').collect();
+    if parts.len() != 3 || !parts[0].eq_ignore_ascii_case("DISPLAY")
+        || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_alphanumeric() || b"&_-".contains(&b)))
+    {
+        return None;
+    }
+    Some(format!(r"SYSTEM\CurrentControlSet\Enum\{instance}\Device Parameters"))
+}
+
+/// EDID base block's 0xFC descriptor contains the manufacturer's model name.
+fn edid_model(edid: &[u8]) -> Option<String> {
+    let base = edid.get(..128)?;
+    if base[..8] != [0, 255, 255, 255, 255, 255, 255, 0]
+        || base.iter().fold(0u8, |sum, &b| sum.wrapping_add(b)) != 0
+    {
+        return None;
+    }
+    for offset in [54, 72, 90, 108] {
+        let descriptor = &base[offset..offset + 18];
+        if descriptor[..5] != [0, 0, 0, 0xfc, 0] {
+            continue;
+        }
+        let text = &descriptor[5..];
+        let end = text.iter().position(|&b| b == 0 || b == b'\n').unwrap_or(text.len());
+        let text = &text[..end];
+        if text.iter().all(|b| (0x20..=0x7e).contains(b)) {
+            if let Some(name) = monitor_name(std::str::from_utf8(text).ok()?) {
+                return Some(name);
+            }
+        }
+    }
+    None
+}
+
+fn edid_name(device: &str) -> Option<String> {
+    let path: Vec<u16> = edid_registry_path(device)?.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let mut key = HKEY::default();
+        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, PCWSTR(path.as_ptr()), 0, KEY_QUERY_VALUE, &mut key).is_err() {
+            return None;
+        }
+        let name = (|| {
+            let mut kind = REG_VALUE_TYPE::default();
+            let mut len = 0;
+            RegQueryValueExW(key, w!("EDID"), None, Some(&mut kind), None, Some(&mut len)).ok().ok()?;
+            // At most 256 EDID blocks, including extension blocks. Query the
+            // complete value: a 128-byte buffer fails for EDIDs with extensions.
+            if kind != REG_BINARY || !(128..=32768).contains(&len) {
+                return None;
+            }
+            let mut data = vec![0u8; len as usize];
+            RegQueryValueExW(key, w!("EDID"), None, Some(&mut kind), Some(data.as_mut_ptr()), Some(&mut len)).ok().ok()?;
+            if kind != REG_BINARY {
+                return None;
+            }
+            edid_model(data.get(..len as usize)?)
+        })();
+        let _ = RegCloseKey(key);
+        name
+    }
+}
+
+/// GDI can still identify a monitor when display configuration is unavailable.
+fn gdi_monitor_name(dev: &str) -> Option<String> {
+    let dev: Vec<u16> = dev.encode_utf16().chain(Some(0)).collect();
+    let mut name = None;
+    let mut active = 0;
+    for index in 0..64 {
+        let mut monitor = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        if !unsafe { EnumDisplayDevicesW(PCWSTR(dev.as_ptr()), index, &mut monitor, EDD_GET_DEVICE_INTERFACE_NAME) }.as_bool() {
+            break;
+        }
+        if monitor.StateFlags & DISPLAY_DEVICE_ACTIVE != 0 {
+            active += 1;
+            if active > 1 {
+                return None; // No reliable association for a cloned GDI source.
+            }
+            name = edid_name(&wide_str(&monitor.DeviceID)).or_else(|| monitor_name(&wide_str(&monitor.DeviceString)));
+        }
+    }
+    name
 }
 
 /// Active monitors as (handle, GDI device name, bounds).
@@ -365,44 +484,52 @@ struct Target {
 fn display_targets() -> Vec<Target> {
     let mut out = Vec::new();
     unsafe {
-        let (mut np, mut nm) = (0u32, 0u32);
-        if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm).is_err() {
-            return out;
-        }
-        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
-        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
-        if QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), None)
-            .is_err()
-        {
-            return out;
-        }
-        for p in &paths[..np as usize] {
-            let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
-            src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
-            src.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
-            src.header.adapterId = p.sourceInfo.adapterId;
-            src.header.id = p.sourceInfo.id;
-            if DisplayConfigGetDeviceInfo(&mut src.header) != 0 {
+        // Hot-plugging can invalidate the sizes between these two API calls.
+        // Retry with fresh buffers, but never spin indefinitely on a bad driver.
+        for _ in 0..3 {
+            let (mut np, mut nm) = (0u32, 0u32);
+            if GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut np, &mut nm).is_err() {
+                return out;
+            }
+            let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); np as usize];
+            let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); nm as usize];
+            let status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &mut np, paths.as_mut_ptr(), &mut nm, modes.as_mut_ptr(), None);
+            if status == ERROR_INSUFFICIENT_BUFFER {
                 continue;
             }
-            let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
-            tgt.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
-            tgt.header.size = size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
-            tgt.header.adapterId = p.targetInfo.adapterId;
-            tgt.header.id = p.targetInfo.id;
-            if DisplayConfigGetDeviceInfo(&mut tgt.header) != 0 {
-                continue;
+            if status.is_err() {
+                return out;
             }
-            let tech = tgt.outputTechnology;
-            let internal = tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
-                || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
-                || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
-                || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS;
-            out.push(Target {
-                gdi: wide_str(&src.viewGdiDeviceName),
-                name: wide_str(&tgt.monitorFriendlyDeviceName),
-                internal,
-            });
+            for p in paths.iter().take(np as usize) {
+                let mut src = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+                src.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+                src.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+                src.header.adapterId = p.sourceInfo.adapterId;
+                src.header.id = p.sourceInfo.id;
+                if DisplayConfigGetDeviceInfo(&mut src.header) != 0 {
+                    continue;
+                }
+                let mut tgt = DISPLAYCONFIG_TARGET_DEVICE_NAME::default();
+                tgt.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                tgt.header.size = size_of::<DISPLAYCONFIG_TARGET_DEVICE_NAME>() as u32;
+                tgt.header.adapterId = p.targetInfo.adapterId;
+                tgt.header.id = p.targetInfo.id;
+                let name = if DisplayConfigGetDeviceInfo(&mut tgt.header) == 0 {
+                    monitor_name(&wide_str(&tgt.monitorFriendlyDeviceName))
+                        .or_else(|| edid_name(&wide_str(&tgt.monitorDevicePath)))
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                // Connection technology is available even when the name query fails.
+                let tech = p.targetInfo.outputTechnology;
+                let internal = tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+                    || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+                    || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+                    || tech == DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS;
+                out.push(Target { gdi: wide_str(&src.viewGdiDeviceName), name, internal });
+            }
+            break;
         }
     }
     out
@@ -497,5 +624,77 @@ fn first(svc: &IWbemServices, wql: &str) -> Option<IWbemClassObject> {
         let mut n = 0u32;
         e.Next(WBEM_INFINITE, &mut objs, &mut n).ok().ok()?;
         objs[0].take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn checksum(edid: &mut [u8; 128]) {
+        edid[127] = 0u8.wrapping_sub(edid[..127].iter().fold(0u8, |sum, &b| sum.wrapping_add(b)));
+    }
+
+    fn model_block(slot: usize, text: &[u8]) -> [u8; 128] {
+        let mut edid = [0u8; 128];
+        edid[..8].copy_from_slice(&[0, 255, 255, 255, 255, 255, 255, 0]);
+        let offset = 54 + slot * 18;
+        edid[offset + 3] = 0xfc;
+        edid[offset + 5..offset + 5 + text.len()].copy_from_slice(text);
+        checksum(&mut edid);
+        edid
+    }
+
+    #[test]
+    fn edid_reads_all_descriptor_slots_and_terminators() {
+        for slot in 0..4 {
+            for text in [b"DELL U2723QE\n ".as_slice(), b"DELL U2723QE\0 ", b"DELL U2723QE  "] {
+                assert_eq!(edid_model(&model_block(slot, text)).as_deref(), Some("DELL U2723QE"));
+            }
+        }
+        let mut extended = model_block(0, b"LG TV\n").to_vec();
+        extended.extend_from_slice(&[0; 128]);
+        assert_eq!(edid_model(&extended).as_deref(), Some("LG TV"));
+    }
+
+    #[test]
+    fn edid_rejects_bad_blocks_and_names() {
+        let valid = model_block(0, b"DELL\n");
+        for len in 0..128 {
+            assert!(edid_model(&valid[..len]).is_none());
+        }
+        let mut bad = valid;
+        bad[10] ^= 1;
+        assert!(edid_model(&bad).is_none());
+        bad = valid;
+        bad[0] = 1;
+        checksum(&mut bad);
+        assert!(edid_model(&bad).is_none());
+        for text in [b" \n".as_slice(), b"bad\x80name", b"bad\tname"] {
+            assert!(edid_model(&model_block(0, text)).is_none());
+        }
+        bad = valid;
+        bad[57] = 0xff; // Serial-number descriptors are not model names.
+        checksum(&mut bad);
+        assert!(edid_model(&bad).is_none());
+    }
+
+    #[test]
+    fn generic_labels_are_not_models() {
+        for name in ["", "  ", "Generic PnP Monitor", "generic non-pnp monitor", "Monitor", "bad\0name"] {
+            assert!(monitor_name(name).is_none());
+        }
+        assert_eq!(monitor_name("  DELL U2723QE  ").as_deref(), Some("DELL U2723QE"));
+    }
+
+    #[test]
+    fn registry_paths_are_scoped_to_monitor_instances() {
+        let expected = Some(r"SYSTEM\CurrentControlSet\Enum\DISPLAY\DEL1234\5&abc&0&UID1\Device Parameters".to_string());
+        assert_eq!(edid_registry_path(r"\\?\DISPLAY#DEL1234#5&abc&0&UID1#{e6f07b5f-ee97-4a90-b076-33f57bf4eaa7}"), expected);
+        assert_eq!(edid_registry_path(r"DISPLAY\DEL1234\5&abc&0&UID1"), expected);
+        for path in ["", r"PCI\DEL1234\instance", r"DISPLAY\..\instance", r"DISPLAY\model\instance\extra",
+            r"\\?\DISPLAY#model#instance", r"\\?\DISPLAY#model##{guid}", r"\\?\DISPLAY#model#instance#{guid}#extra"] {
+            assert!(edid_registry_path(path).is_none(), "accepted {path}");
+        }
     }
 }

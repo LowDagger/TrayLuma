@@ -1,0 +1,26 @@
+1 ICON "trayluma.ico"
+1 VERSIONINFO
+FILEVERSION 1,2,0,0
+PRODUCTVERSION 1,2,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "LowDagger\0"
+      VALUE "FileDescription", "TrayLuma - monitor brightness control\0"
+      VALUE "FileVersion", "1.2.0\0"
+      VALUE "InternalName", "TrayLuma\0"
+      VALUE "LegalCopyright", "MIT. Original work (c) 2026 Priyanshu Yadav; TrayLuma modifications (c) 2026 LowDagger\0"
+      VALUE "OriginalFilename", "TrayLuma.exe\0"
+      VALUE "ProductName", "TrayLuma\0"
+      VALUE "ProductVersion", "1.2.0\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

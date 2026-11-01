@@ -1,7 +1,8 @@
-# Stops Brightness Tray, removes it from startup, deletes its settings and the installed exe.
-Get-Process BrightnessTray -ErrorAction SilentlyContinue | Stop-Process -Force
-Remove-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name BrightnessTray -ErrorAction SilentlyContinue
-Remove-Item 'HKCU:\Software\BrightnessTray' -Recurse -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 300
-Remove-Item "$env:LOCALAPPDATA\Programs\BrightnessTray\BrightnessTray.exe" -ErrorAction SilentlyContinue
-"Brightness Tray removed."
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+$uninstaller = "$env:LOCALAPPDATA\Programs\TrayLuma\unins000.exe"
+if (!(Test-Path $uninstaller)) { throw 'TrayLuma uninstaller not found.' }
+$p = Start-Process $uninstaller -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait -PassThru
+if ($p.ExitCode) { throw "Uninstall failed ($($p.ExitCode))." }
+'TrayLuma removed. Shared legacy shortcut preferences were preserved.'
